@@ -414,8 +414,9 @@ def report_meta(records: list[dict], effort: str, country: str, hidden: int = 0,
 
 
 def main() -> None:
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     ap = argparse.ArgumentParser(description="Які джерела цитує Perplexity за вашими промптами")
     ap.add_argument("input", nargs="?", help="txt (промпт на рядок), xlsx або csv (перша колонка)")
     ap.add_argument("--domain", default="", help="ваш домен: показати, де його цитують, а де ні")
