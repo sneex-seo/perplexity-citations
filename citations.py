@@ -26,6 +26,8 @@ from urllib.parse import urlparse
 
 import requests
 
+import targets
+
 HERE = Path(__file__).resolve().parent
 API_URL = "https://api.perplexity.ai/v1/agent"
 REPO_URL = "https://github.com/sneex-seo/perplexity-citations"
@@ -33,7 +35,8 @@ REPO_URL = "https://github.com/sneex-seo/perplexity-citations"
 EFFORTS = ("fast", "low", "medium", "high")
 DEFAULT_EFFORT = "fast"     # один пошук і коротка відповідь; low, medium і high шукають кілька разів
 DEFAULT_COUNTRY = "UA"      # пошук «як з України»; порожній рядок - без прив'язки до країни
-MAX_OUTPUT_TOKENS = 1500
+# Глибші режими витрачають частину ліміту на міркування: з 1500 токенів відповідь у high обривалася
+MAX_OUTPUT_TOKENS = {"fast": 1500, "low": 2500, "medium": 4000, "high": 6000}
 PAUSE_BETWEEN = 1.0         # секунд між промптами
 MAX_RETRIES = 4
 REQUEST_TIMEOUT = (15, 600)
@@ -113,7 +116,7 @@ def build_body(prompt: str, effort: str, country: str, domain_filter: list[str],
     if filters:
         tool["filters"] = filters
     # Власних instructions не передаємо: саме системний промпт режиму effort змушує модель посилатися на джерела.
-    return {"effort": effort, "input": prompt, "max_output_tokens": MAX_OUTPUT_TOKENS, "tools": [tool]}
+    return {"effort": effort, "input": prompt, "max_output_tokens": MAX_OUTPUT_TOKENS[effort], "tools": [tool]}
 
 
 def call_api(body: dict, api_key: str) -> dict:
@@ -299,6 +302,17 @@ def build_xlsx(records: list[dict], summ: dict, path: Path) -> None:
             rows.append([n, rec["prompt"], OWN_LABEL[status], pos, ", ".join(list(dict.fromkeys(instead))[:5])])
         sheet(wb.create_sheet("Ваш домен"), ["№", "Промпт", f"{own}", "Місце серед цитувань", "Кого цитує замість"],
               [5, 50, 30, 12, 60], rows, {1, 4})
+
+    checked = bool(own or summ["brands"])
+    rows = []
+    for n, t in enumerate((t for t in summ["targets"] if t["type"] != targets.OWN), 1):
+        rows.append([n, t["score"], t["domain"], t["type"], t["answers"], t["cited"]] + ([t["status"]] if checked else [])
+                    + [t["action"], "\n".join(u for u, _ in t["urls"][:10])])
+    sheet(wb.create_sheet("Де отримати посилання", 0),
+          ["№", "Пріоритет", "Домен", "Тип", "У скількох відповідях", "Цитувань"]
+          + (["Ваш сайт на цих сторінках"] if checked else []) + ["Що робити", "Процитовані сторінки"],
+          [5, 10, 28, 22, 12, 10] + ([24] if checked else []) + [60, 80], rows, {1, 2, 5, 6})
+    wb.active = 0
     wb.save(path)
 
 
@@ -317,7 +331,7 @@ CSS = """
 .scroll{overflow-x:auto;background:var(--card);border:1px solid var(--line);border-radius:12px}
 table{border-collapse:collapse;width:100%;font-size:14px}th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
 th{font-size:12px;color:var(--muted);font-weight:600;white-space:nowrap}td.n,th.n{text-align:right;white-space:nowrap}tr:last-child td{border-bottom:0}
-.bar{height:8px;border-radius:4px;background:var(--accent);min-width:2px}.dom{min-width:150px;overflow-wrap:anywhere}
+.bar{height:8px;border-radius:4px;background:var(--accent);min-width:2px}.dom{min-width:170px;overflow-wrap:anywhere}
 details{background:var(--card);border:1px solid var(--line);border-radius:12px;margin:0 0 10px}
 summary{cursor:pointer;padding:12px 14px;display:flex;gap:10px;align-items:baseline}summary .q{flex:1;font-weight:600}
 summary .c{color:var(--muted);font-size:13px;white-space:nowrap}.body{padding:0 14px 14px}
@@ -327,6 +341,9 @@ summary .c{color:var(--muted);font-size:13px;white-space:nowrap}.body{padding:0 
 ol.src{margin:0;padding-left:22px;font-size:14px}ol.src li{margin:0 0 6px}ol.src li.no{color:var(--muted)}
 .tag{font-size:12px;border-radius:6px;padding:1px 6px;margin-right:6px;white-space:nowrap}.tag.yes{background:var(--ok);color:#fff}.tag.not{border:1px solid var(--line)}
 .own{border-left:4px solid var(--ok)}footer{margin-top:32px;color:var(--muted);font-size:13px}
+.c{color:var(--muted);font-size:12px}.urls{font-size:12px;margin-top:4px}
+.urls a{display:block;max-width:440px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.st{font-size:12px;border-radius:6px;padding:1px 6px;white-space:nowrap;background:var(--soft)}.st.win{background:var(--ok);color:#fff}
 """
 
 
@@ -349,7 +366,26 @@ def build_html(records: list[dict], summ: dict, meta: dict, path: Path) -> None:
              ("Доменів процитовано", summ["domains_cited"]), ("Вартість прогону", f"${summ['cost']:.3f}")]
     if own:
         tiles.insert(1, (f"{own} процитовано", f"{summ['own_statuses']['cited']} з {n}"))
+    cands = [t for t in summ["targets"] if t["type"] != targets.OWN]
+    reachable = sum(1 for t in cands if t["type"] in (targets.MEDIA, targets.BLOG, targets.UGC))
+    tiles.insert(-1, ("Медіа, блогів і форумів серед джерел", reachable))
+    checked = bool(own or summ["brands"])
+    if checked:
+        tiles.insert(-1, ("Згадують вас без посилання", sum(1 for t in cands if t["status"] == targets.MENTIONS)))
     tiles_html = "".join(f'<div class="tile"><b>{e(str(v))}</b><span>{e(k)}</span></div>' for k, v in tiles)
+
+    def target_row(t):
+        pages = "".join(f'<a href="{e(u)}" rel="nofollow noopener" target="_blank">{e(title or u)}</a>'
+                        for u, title in t["urls"][:3])
+        status = ""
+        if checked:
+            win = " win" if t["status"] == targets.MENTIONS else ""
+            status = f'<td><span class="st{win}">{e(t["status"])}</span></td>'
+        return (f'<tr><td class="n">{t["score"]:g}</td><td class="dom"><b>{e(t["domain"])}</b><div class="c">{e(t["type"])}'
+                f'</div></td><td class="n">{t["answers"]} з {n}</td>{status}<td>{e(t["action"])}<div class="urls">{pages}'
+                f'</div></td></tr>')
+    targets_html = "".join(target_row(t) for t in cands[:30])
+    status_th = "<th>Ваш сайт на сторінках</th>" if checked else ""
 
     top = [r for r in summ["rows"] if r["cited"]][:40]
     peak = max((r["cited"] for r in top), default=1)
@@ -387,6 +423,12 @@ def build_html(records: list[dict], summ: dict, meta: dict, path: Path) -> None:
 <h1>{e(meta["title"])}</h1>
 <p class="meta">{e(meta["line"])}</p>
 <div class="tiles">{tiles_html}</div>
+<h2>Де отримати посилання</h2>
+<div class="scroll"><table><thead><tr><th class="n">Пріоритет</th><th>Домен і тип</th><th class="n">У відповідях</th>{status_th}
+<th>Що робити і які сторінки цитує Perplexity</th></tr></thead><tbody>{targets_html}</tbody></table></div>
+<p class="meta">Пріоритет - у скількох відповідях процитовано домен, помножене на вагу типу: медіа й блоги 1, форуми й
+соцмережі 0.8, маркетплейси 0.6, інше 0.5, магазини 0.4, вікі 0.3, держсайти й наука 0.1. Якщо сторінки домену вже
+згадують ваш бренд без посилання, пріоритет ×1.5, якщо вже посилаються на вас - ×0.3.</p>
 <h2>Які домени цитує Perplexity</h2>
 <div class="scroll"><table><thead><tr><th class="n">#</th><th>Домен</th><th class="n">Цитувань</th><th class="n">У відповідях</th>
 <th class="n">Частка</th><th></th><th class="n">Цитує із знайденого</th></tr></thead><tbody>{rows_html}</tbody></table></div>
@@ -420,6 +462,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Які джерела цитує Perplexity за вашими промптами")
     ap.add_argument("input", nargs="?", help="txt (промпт на рядок), xlsx або csv (перша колонка)")
     ap.add_argument("--domain", default="", help="ваш домен: показати, де його цитують, а де ні")
+    ap.add_argument("--brand", default="", help="назви бренду через кому: шукати згадки на процитованих сторінках")
+    ap.add_argument("--no-fetch", action="store_true", help="не завантажувати процитовані сторінки: тип сайту лише за адресою")
     ap.add_argument("--effort", default=DEFAULT_EFFORT, choices=EFFORTS, help="глибина пошуку (за замовчуванням fast)")
     ap.add_argument("--country", default=DEFAULT_COUNTRY, help='код країни пошуку, "" - без прив\'язки')
     ap.add_argument("--domain-filter", default="", help="шукати лише на цих доменах, через кому; -домен виключає")
@@ -486,6 +530,18 @@ def main() -> None:
     tlds = [t.strip().lower().lstrip(".") for t in args.exclude_tld.split(",") if t.strip()]
     records, hidden = hide_tlds(records, tlds)
     summ = summarize(records, own)
+    brands = [b.strip() for b in args.brand.split(",") if b.strip()]
+    pages = {}
+    if not args.no_fetch:
+        urls = list(dict.fromkeys(s["url"] for r in records for s in r["sources"]
+                                  if s["cited"] and not is_own(s["domain"], own)))
+        log(f"Відкриваю процитовані сторінки ({len(urls)}), щоб визначити тип сайтів"
+            + (" і знайти згадки бренду" if own or brands else "") + "...")
+        pages = targets.Fetcher(out_dir / "pages.json").fetch_all(urls)
+        failed = sum(1 for p in pages.values() if not p.get("ok"))
+        if failed:
+            log(f"    не вдалося відкрити {failed} з {len(urls)}: тип для них визначено за адресою")
+    summ["targets"], summ["brands"] = targets.link_targets(records, pages, own, brands), brands
     stamp = datetime.now().strftime("%Y-%m-%d")
     xlsx_path, html_path = out_dir / f"citations_{stamp}.xlsx", out_dir / "report.html"
     build_xlsx(records, summ, xlsx_path)
