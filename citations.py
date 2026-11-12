@@ -344,6 +344,10 @@ ol.src{margin:0;padding-left:22px;font-size:14px}ol.src li{margin:0 0 6px}ol.src
 .c{color:var(--muted);font-size:12px}.urls{font-size:12px;margin-top:4px}
 .urls a{display:block;max-width:440px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .st{font-size:12px;border-radius:6px;padding:1px 6px;white-space:nowrap;background:var(--soft)}.st.win{background:var(--ok);color:#fff}
+@media (max-width:640px){table.tgt thead{display:none}
+table.tgt tr{display:grid;grid-template-columns:auto 1fr auto;gap:4px 12px;padding:12px;border-bottom:1px solid var(--line)}
+table.tgt tr:last-child{border-bottom:0}table.tgt td{border:0;padding:0}table.tgt td.dom{min-width:0}
+table.tgt td.stc,table.tgt td.act{grid-column:1/-1}.urls a{max-width:100%}}
 """
 
 
@@ -380,10 +384,10 @@ def build_html(records: list[dict], summ: dict, meta: dict, path: Path) -> None:
         status = ""
         if checked:
             win = " win" if t["status"] == targets.MENTIONS else ""
-            status = f'<td><span class="st{win}">{e(t["status"])}</span></td>'
+            status = f'<td class="stc"><span class="st{win}">{e(t["status"])}</span></td>'
         return (f'<tr><td class="n">{t["score"]:g}</td><td class="dom"><b>{e(t["domain"])}</b><div class="c">{e(t["type"])}'
-                f'</div></td><td class="n">{t["answers"]} з {n}</td>{status}<td>{e(t["action"])}<div class="urls">{pages}'
-                f'</div></td></tr>')
+                f'</div></td><td class="n">{t["answers"]} з {n}</td>{status}<td class="act">{e(t["action"])}'
+                f'<div class="urls">{pages}</div></td></tr>')
     targets_html = "".join(target_row(t) for t in cands[:30])
     status_th = "<th>Ваш сайт на сторінках</th>" if checked else ""
 
@@ -424,7 +428,7 @@ def build_html(records: list[dict], summ: dict, meta: dict, path: Path) -> None:
 <p class="meta">{e(meta["line"])}</p>
 <div class="tiles">{tiles_html}</div>
 <h2>Де отримати посилання</h2>
-<div class="scroll"><table><thead><tr><th class="n">Пріоритет</th><th>Домен і тип</th><th class="n">У відповідях</th>{status_th}
+<div class="scroll"><table class="tgt"><thead><tr><th class="n">Пріоритет</th><th>Домен і тип</th><th class="n">У відповідях</th>{status_th}
 <th>Що робити і які сторінки цитує Perplexity</th></tr></thead><tbody>{targets_html}</tbody></table></div>
 <p class="meta">Пріоритет - у скількох відповідях процитовано домен, помножене на вагу типу: медіа й блоги 1, форуми й
 соцмережі 0.8, маркетплейси 0.6, інше 0.5, магазини 0.4, вікі 0.3, держсайти й наука 0.1. Якщо сторінки домену вже
