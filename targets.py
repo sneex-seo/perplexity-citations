@@ -7,6 +7,7 @@ schema.org та ознаками інтернет-магазину. З --domain 
 """
 from __future__ import annotations
 
+import html
 import json
 import re
 import threading
@@ -83,57 +84,78 @@ def _matches(domain: str, names: tuple[str, ...]) -> bool:
 
 
 # ------------------------------ сторінки -----------------------------------
+VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+# Блоки навколо статті, де назва бренду - не згадка: меню, каталог, товари, «читайте також», коментарі
+SKIP_TAGS = {"script", "style", "noscript", "svg", "nav", "aside", "footer", "header", "form", "button", "select",
+             "template", "iframe"}
+NOISE = re.compile(r"related|recommend|product|carousel|slider|swiper|sidebar|widget|banner|share|comment|"
+                   r"\btags?\b|breadcrumb|menu|filter|catalog|popular|similar|read-?more|subscribe|advert|promo|"
+                   r"cross-?sell|upsell", re.I)
+
+
 class _Page(HTMLParser):
-    """Посилання, JSON-LD, og:type і видимий текст сторінки без сторонніх бібліотек."""
+    """Посилання, JSON-LD, og:type і текст сторінки без сторонніх бібліотек.
+
+    Для пошуку згадок текст збирається лише з тексту статті: без меню, каталогу, блоків товарів і схожих матеріалів,
+    а текст посилань - лише всередині абзаців, бо поза ними це навігація або картки."""
 
     def __init__(self, base: str):
         super().__init__(convert_charrefs=True)
-        self.base, self.hosts, self.ld, self.og, self.text, self.main = base, set(), [], "", [], []
-        self.main_hosts: set[str] = set()
-        self._skip, self._ld, self._in_main = 0, None, 0
+        self.base, self.hosts, self.main_hosts, self.ld, self.og = base, set(), set(), [], ""
+        self.text, self.main = [], []
+        self.stack: list[tuple[str, bool]] = []
+        self._ld = None
+
+    def _flags(self) -> tuple[bool, bool, bool, bool]:
+        tags = [t for t, _ in self.stack]
+        skip = any(noisy for _, noisy in self.stack)
+        return skip, "article" in tags or "main" in tags, "p" in tags, "a" in tags
 
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
-        if tag in ("article", "main"):
-            self._in_main += 1
+        if tag == "meta" and (a.get("property") or "").lower() == "og:type":
+            self.og = (a.get("content") or "").lower()
+        if tag == "script" and (a.get("type") or "").lower() == "application/ld+json":
+            self._ld = []
         if tag == "a" and a.get("href"):
             host = (urlparse(urljoin(self.base, a["href"])).hostname or "").lower()
             if host:
                 host = host[4:] if host.startswith("www.") else host
                 self.hosts.add(host)
-                if self._in_main:
+                if self._flags()[1]:
                     self.main_hosts.add(host)
-        elif tag == "meta" and (a.get("property") or "").lower() == "og:type":
-            self.og = (a.get("content") or "").lower()
-        elif tag == "script":
-            self._skip += 1
-            if (a.get("type") or "").lower() == "application/ld+json":
-                self._ld = []
-        elif tag in ("style", "noscript", "svg"):
-            self._skip += 1
+        if tag not in VOID:
+            noisy = tag in SKIP_TAGS or bool(NOISE.search(f'{a.get("class") or ""} {a.get("id") or ""}'))
+            self.stack.append((tag, noisy))
 
     def handle_endtag(self, tag):
-        if tag in ("article", "main"):
-            self._in_main = max(0, self._in_main - 1)
-        if tag == "script":
-            if self._ld is not None:
-                self.ld.append("".join(self._ld))
-                self._ld = None
-            self._skip = max(0, self._skip - 1)
-        elif tag in ("style", "noscript", "svg"):
-            self._skip = max(0, self._skip - 1)
+        if tag == "script" and self._ld is not None:
+            self.ld.append("".join(self._ld))
+            self._ld = None
+        # Незакриті теги в кривій розмітці: знімаємо зі стека все до відповідного відкритого
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i][0] == tag:
+                del self.stack[i:]
+                break
 
     def handle_data(self, data):
         if self._ld is not None:
             self._ld.append(data)
-        elif not self._skip and data.strip():
-            self.text.append(data.strip())
-            if self._in_main:
-                self.main.append(data.strip())
+            return
+        text = data.strip()
+        if not text:
+            return
+        skip, in_main, in_p, in_a = self._flags()
+        if skip or (in_a and not in_p):
+            return
+        self.text.append(text)
+        if in_main:
+            self.main.append(text)
 
 
-def _ld_types(blocks: list[str]) -> list[str]:
-    found = set()
+def _ld_scan(blocks: list[str]) -> tuple[list[str], str]:
+    """Типи schema.org з усіх блоків JSON-LD і найдовший articleBody, якщо сайт його віддає."""
+    found, bodies = set(), []
 
     def walk(node):
         if isinstance(node, dict):
@@ -141,6 +163,8 @@ def _ld_types(blocks: list[str]) -> list[str]:
             for v in t if isinstance(t, list) else [t]:
                 if isinstance(v, str):
                     found.add(v.lower())
+            if isinstance(node.get("articleBody"), str):
+                bodies.append(node["articleBody"])
             for v in node.values():
                 walk(v)
         elif isinstance(node, list):
@@ -152,7 +176,7 @@ def _ld_types(blocks: list[str]) -> list[str]:
             walk(json.loads(b))
         except ValueError:
             continue
-    return sorted(found)
+    return sorted(found), max(bodies, key=len, default="")
 
 
 def parse_page(url: str, html_text: str) -> dict:
@@ -161,12 +185,15 @@ def parse_page(url: str, html_text: str) -> dict:
         p.feed(html_text)
     except Exception:
         pass
-    # Згадки й посилання шукаємо в основному тексті (article або main), щоб не рахувати меню і футер.
+    types, body = _ld_scan(p.ld)
     main = " ".join(p.main)
-    use_main = len(main) >= 500
-    text = main if use_main else " ".join(p.text)
-    return {"ok": True, "types": _ld_types(p.ld), "og": p.og, "cart": bool(CART.search(html_text)),
-            "hosts": sorted(p.main_hosts if use_main else p.hosts), "text": text[:TEXT_LIMIT]}
+    if len(body) >= 500:
+        # articleBody інколи віддають разом із HTML-тегами
+        text = re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", body))).strip()
+    else:
+        text = main if len(main) >= 500 else " ".join(p.text)
+    return {"ok": True, "types": types, "og": p.og, "cart": bool(CART.search(html_text)),
+            "hosts": sorted(p.main_hosts if len(main) >= 500 else p.hosts), "text": text[:TEXT_LIMIT]}
 
 
 class Fetcher:
@@ -251,18 +278,27 @@ def classify(domain: str, url: str, page: dict | None, own: str = "") -> str:
     return OTHER
 
 
-def mention_status(pages: list[dict], own: str, brands: list[str]) -> str:
-    """Найкращий статус серед сторінок домену: посилання, згадка без посилання, немає або невідомо."""
+def brand_check(pages: list[tuple[str, dict | None]], own: str, brands: list[str]) -> tuple[str, str, str]:
+    """Найкращий статус серед сторінок домену і доказ: (статус, адреса сторінки, фрагмент тексту зі згадкою)."""
     if not own and not brands:
-        return ""
+        return "", "", ""
     terms = [b.lower() for b in brands] + ([own] if own else [])
     rx = re.compile(r"(?<![\w.-])(" + "|".join(re.escape(t) for t in terms) + r")(?![\w-])", re.I)
-    checked = [p for p in pages if p and p.get("ok")]
-    if own and any(h == own or h.endswith("." + own) for p in checked for h in p["hosts"]):
-        return LINKS
-    if any(rx.search(p["text"]) for p in checked):
-        return MENTIONS
-    return ABSENT if checked else UNKNOWN
+    checked = [(u, p) for u, p in pages if p and p.get("ok")]
+    for u, p in checked:
+        if own and any(h == own or h.endswith("." + own) for h in p["hosts"]):
+            return LINKS, u, ""
+    for u, p in checked:
+        m = rx.search(p["text"])
+        if m:
+            a, b = max(0, m.start() - 70), min(len(p["text"]), m.end() + 70)
+            snippet = ("..." if a else "") + p["text"][a:b].strip() + ("..." if b < len(p["text"]) else "")
+            return MENTIONS, u, snippet
+    return (ABSENT if checked else UNKNOWN), "", ""
+
+
+def mention_status(pages: list[dict], own: str, brands: list[str]) -> str:
+    return brand_check([("", p) for p in pages], own, brands)[0]
 
 
 def link_targets(records: list[dict], pages: dict[str, dict], own: str = "", brands: list[str] = ()) -> list[dict]:
@@ -282,14 +318,18 @@ def link_targets(records: list[dict], pages: dict[str, dict], own: str = "", bra
         dom_pages = [pages.get(u) for u in urls]
         votes = [classify(d["domain"], u, p, own) for u, p in zip(urls, dom_pages)]
         kind = max(set(votes), key=lambda k: (votes.count(k), -list(WEIGHT).index(k)))
-        status = "" if kind == OWN else mention_status(dom_pages, own, list(brands))
+        status, proof_url, snippet = ("", "", "") if kind == OWN else brand_check(list(zip(urls, dom_pages)), own,
+                                                                                 list(brands))
         answers = len(d["prompts"])
         score = round(answers * WEIGHT[kind] * STATUS_FACTOR[status], 2)
         action = ACTION[kind]
         if status == MENTIONS:
             action = "Швидкий виграш: попросіть додати посилання на згадку. " + action
+        # сторінка з доказом - першою, щоб її було видно серед показаних
+        ordered = sorted(d["urls"].items(), key=lambda kv: kv[0] != proof_url)
         out.append({"domain": d["domain"], "type": kind, "cited": d["cited"], "answers": answers, "score": score,
-                    "status": status, "action": action, "urls": list(d["urls"].items()), "prompts": list(d["prompts"])})
+                    "status": status, "proof_url": proof_url, "snippet": snippet, "action": action, "urls": ordered,
+                    "prompts": list(d["prompts"])})
     out.sort(key=lambda r: (-r["score"], -r["answers"], -r["cited"], r["domain"]))
     return out
 

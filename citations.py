@@ -312,12 +312,14 @@ def build_xlsx(records: list[dict], summ: dict, meta: dict, path: Path) -> None:
     checked = bool(own or summ["brands"])
     rows = []
     for n, t in enumerate((t for t in summ["targets"] if t["type"] != targets.OWN), 1):
-        rows.append([n, t["score"], t["domain"], t["type"], t["answers"], t["cited"]] + ([t["status"]] if checked else [])
+        rows.append([n, t["score"], t["domain"], t["type"], t["answers"], t["cited"]]
+                    + ([t["status"], t["proof_url"], t["snippet"]] if checked else [])
                     + [t["action"], "\n".join(u for u, _ in t["urls"][:10])])
     sheet(wb.create_sheet("Де отримати посилання", 0),
           ["№", "Пріоритет", "Домен", "Тип", "У скількох відповідях", "Цитувань"]
-          + (["Ваш сайт на цих сторінках"] if checked else []) + ["Що робити", "Процитовані сторінки"],
-          [5, 10, 28, 22, 12, 10] + ([24] if checked else []) + [60, 80], rows, {1, 2, 5, 6})
+          + (["Ваш сайт на цих сторінках", "Де саме", "Фрагмент зі згадкою"] if checked else [])
+          + ["Що робити", "Процитовані сторінки"],
+          [5, 10, 28, 22, 12, 10] + ([24, 50, 60] if checked else []) + [60, 80], rows, {1, 2, 5, 6})
 
     rows = []
     for i, c in [("ви", summ["own_row"])] * bool(summ["own_row"]) + list(enumerate(summ["competitors"], 1)):
@@ -361,6 +363,7 @@ summary .c{color:var(--muted);font-size:13px}.body{padding:0 14px 14px}
 .own{border-left:4px solid var(--ok)}footer{margin-top:32px;color:var(--muted);font-size:13px}
 .c{color:var(--muted);font-size:12px}.urls{font-size:12px;margin-top:4px}
 .urls a{display:block;max-width:440px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ev{font-size:12px;color:var(--muted);margin-top:4px;max-width:340px}
 .st{font-size:12px;border-radius:6px;padding:1px 6px;white-space:nowrap;background:var(--soft)}.st.win{background:var(--ok);color:#fff}
 .brief{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px 18px;background:var(--card);
 border:1px solid var(--line);border-radius:12px;padding:14px;margin:12px 0}.brief span{display:block;color:var(--muted);font-size:12px}
@@ -470,13 +473,22 @@ def build_html(records: list[dict], summ: dict, meta: dict, path: Path) -> None:
                  f'<tbody>{"".join(comp_rows)}</tbody></table></div>' if comp_rows
                  else '<p class="meta">Серед процитованих сайтів магазинів немає.</p>')
 
+    names = summ["brands"] + ([own] if own else [])
+    brand_rx = re.compile("(" + "|".join(re.escape(html.escape(x)) for x in names) + ")", re.I) if names else None
+
     def target_row(t):
         pages = "".join(f'<a href="{e(u)}" rel="nofollow noopener" target="_blank">{e(title or u)}</a>'
                         for u, title in t["urls"][:3])
         status = ""
         if checked:
             win = " win" if t["status"] == targets.MENTIONS else ""
-            status = f'<td class="wide"><span class="st{win}">{e(t["status"])}</span></td>'
+            proof = ""
+            if t["proof_url"]:
+                marked = brand_rx.sub(r"<b>\1</b>", e(t["snippet"])) if brand_rx else e(t["snippet"])
+                quote = f"«{marked}» " if t["snippet"] else ""
+                proof = (f'<div class="ev">{quote}<a href="{e(t["proof_url"])}" rel="nofollow noopener" target="_blank">'
+                         f'на цій сторінці</a></div>')
+            status = f'<td class="wide"><span class="st{win}">{e(t["status"])}</span>{proof}</td>'
         return (f'<tr><td class="n">{t["score"]:g}</td><td class="dom"><b>{e(t["domain"])}</b><div class="c">{e(t["type"])}'
                 f'</div></td><td class="n">{t["answers"]} з {n}</td>{status}<td class="wide">{e(t["action"])}'
                 f'<div class="urls">{pages}</div></td></tr>')

@@ -98,6 +98,9 @@ def test_page_parser_and_mentions():
     assert t.mention_status([p], "other.ua", ["Volt"]) == t.ABSENT
     assert t.mention_status([{"ok": False}], "other.ua", []) == t.UNKNOWN
     assert t.mention_status([p], "", []) == ""
+    status, url, snippet = t.brand_check([("https://a.ua/1", {"ok": True, "hosts": [], "text": "Без бренду."}),
+                                          ("https://a.ua/2", p)], "other.ua", ["Volta Power"])
+    assert status == t.MENTIONS and url == "https://a.ua/2" and "Volta Power" in snippet
 
 
 def test_mentions_only_in_main_text():
@@ -107,6 +110,19 @@ def test_mentions_only_in_main_text():
                  '<footer>Volta Power</footer>')
     p = t.parse_page("https://news.example/a", html_text)
     assert t.mention_status([p], "mybrand.ua", ["Volta Power"]) == t.ABSENT
+
+
+def test_mentions_ignore_product_blocks_and_link_lists():
+    import targets as t
+    body = "Текст статті без згадок. " * 30
+    html_text = (f'<main><article><p>{body}</p><div class="related-products"><p>Volta Power X1</p></div>'
+                 '<ul><li><a href="/x">Volta Power X2</a></li></ul><p>Читайте <a href="/y">про</a> інше.</p>'
+                 '</article></main>')
+    p = t.parse_page("https://shop.example/a", html_text)
+    assert t.mention_status([p], "", ["Volta Power"]) == t.ABSENT and "про" in p["text"]
+    ld = '{"@type":"Article","articleBody":"<p>' + "Огляд. " * 100 + 'Беріть <b>Volta Power</b>.</p>"}'
+    p = t.parse_page("https://news.example/a", f'<script type="application/ld+json">{ld}</script><main>{body}</main>')
+    assert t.mention_status([p], "", ["Volta Power"]) == t.MENTIONS and "<p>" not in p["text"]
 
 
 def test_link_targets_priority():
