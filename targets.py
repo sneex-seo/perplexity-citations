@@ -272,9 +272,9 @@ def link_targets(records: list[dict], pages: dict[str, dict], own: str = "", bra
         for s in rec["sources"]:
             if not s["cited"] or not s["domain"]:
                 continue
-            d = by_dom.setdefault(s["domain"], {"domain": s["domain"], "cited": 0, "prompts": set(), "urls": {}})
+            d = by_dom.setdefault(s["domain"], {"domain": s["domain"], "cited": 0, "prompts": {}, "urls": {}})
             d["cited"] += 1
-            d["prompts"].add(rec["prompt"])
+            d["prompts"][rec["prompt"]] = None
             d["urls"].setdefault(s["url"], s["title"])
     out = []
     for d in by_dom.values():
@@ -289,6 +289,20 @@ def link_targets(records: list[dict], pages: dict[str, dict], own: str = "", bra
         if status == MENTIONS:
             action = "Швидкий виграш: попросіть додати посилання на згадку. " + action
         out.append({"domain": d["domain"], "type": kind, "cited": d["cited"], "answers": answers, "score": score,
-                    "status": status, "action": action, "urls": list(d["urls"].items())})
+                    "status": status, "action": action, "urls": list(d["urls"].items()), "prompts": list(d["prompts"])})
     out.sort(key=lambda r: (-r["score"], -r["answers"], -r["cited"], r["domain"]))
     return out
+
+
+def competitors(rows: list[dict], names: list[str] = (), limit: int = 5) -> list[dict]:
+    """Конкуренти серед джерел: заданий список доменів або магазини, які Perplexity цитує найчастіше."""
+    by_reach = sorted(rows, key=lambda r: (-r["answers"], -r["cited"], r["domain"]))
+    if not names:
+        return [r for r in by_reach if r["type"] == SHOP][:limit]
+    out = []
+    for name in names:
+        hits = [r for r in by_reach if r["domain"] == name or r["domain"].endswith("." + name)]
+        prompts = list(dict.fromkeys(p for r in hits for p in r["prompts"]))
+        out.append({"domain": name, "type": hits[0]["type"] if hits else "", "answers": len(prompts),
+                    "cited": sum(r["cited"] for r in hits), "prompts": prompts})
+    return sorted(out, key=lambda r: (-r["answers"], -r["cited"], r["domain"]))

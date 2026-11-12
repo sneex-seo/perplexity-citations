@@ -66,7 +66,8 @@ def test_hide_tlds_keeps_journal_record_intact():
     shown, hidden = c.hide_tlds([rec], ["ru", "by"])
     assert hidden == 2 and [s["domain"] for s in shown[0]["sources"]] == ["a.com.ua"]
     assert len(rec["sources"]) == 3
-    assert "<sup>[2]</sup>" in c._answer_html("x [2][1]", "p1", {1})
+    out = c._answer_html("x [2][1]", "p1", {1})
+    assert "<sup>[1]</sup>" in out and 'href="#p1-1">[2]</a>' in out
 
 
 def test_classify_by_lists_url_and_markup():
@@ -128,4 +129,39 @@ def test_load_prompts_txt(tmp_path):
 
 def test_answer_html_links_markers():
     out = c._answer_html("a **b** [web:2][3] <x>", "p1")
-    assert "<b>b</b>" in out and 'href="#p1-2"' in out and 'href="#p1-3"' in out and "&lt;x&gt;" in out
+    assert "<b>b</b>" in out and "&lt;x&gt;" in out
+    # номер у тексті - порядок цитування, як і в списку джерел; посилання веде на справжнє джерело
+    assert 'href="#p1-2">[1]</a>' in out and 'href="#p1-3">[2]</a>' in out
+
+
+def test_rivals_by_name_and_domain():
+    assert c.parse_rivals("Bluetti, Fossibot=https://www.fossi-bot.com.ua/, shop.ua") == [
+        {"name": "Bluetti", "domain": ""}, {"name": "Fossibot", "domain": "fossi-bot.com.ua"},
+        {"name": "", "domain": "shop.ua"}]
+    recs = [{"prompt": "p1", "answer": "Беріть Bluetti або EcoFlow.", "sources": [
+                {"cited": True, "domain": "fossi-bot.com.ua", "url": "https://fossi-bot.com.ua/a", "title": ""}]},
+            {"prompt": "p2", "answer": "Bluetti-подібні станції", "sources": []}]
+    assert c.mentioned_in(recs, ["bluetti"]) == ["p1"]
+    import targets as t
+    rows, mine = c.rival_rows(recs, t.link_targets(recs, {}), c.parse_rivals("Bluetti,Fossibot=fossi-bot.com.ua"),
+                              "ecoflow.ua", ["EcoFlow"])
+    assert [(r["name"], len(r["mentions"]), r["answers"]) for r in rows] == [("Bluetti", 1, 0), ("Fossibot", 0, 1)]
+    assert mine["mentions"] == ["p1"] and mine["answers"] == 0
+
+
+def test_plain_math():
+    raw = r"Формула: \(P_{\text{станції}} \geq (\sum P_{\text{приладів}} + P_{\text{піку}}) \times 1{,}2\text{–}1{,}3\)"
+    assert c.plain_math(raw) == "Формула: P(станції) ≥ (Σ P(приладів) + P(піку)) × 1,2–1,3"
+    assert c.plain_math(r"\(E \approx (P \times t)/0{,}8\)") == "E ≈ (P × t)/0,8"
+    assert c.plain_math(r"\[\frac{a}{b} \leq 1\]") == "(a)/(b) ≤ 1"
+
+
+def test_competitors_auto_and_given():
+    import targets as t
+    rows = [{"domain": d, "type": k, "answers": a, "cited": a, "prompts": [f"p{i}" for i in range(a)]}
+            for d, k, a in (("media.ua", t.MEDIA, 9), ("shop-a.ua", t.SHOP, 3), ("shop-b.ua", t.SHOP, 5),
+                            ("blog.shop-c.ua", t.BLOG, 2))]
+    assert [r["domain"] for r in t.competitors(rows)] == ["shop-b.ua", "shop-a.ua"]
+    given = t.competitors(rows, ["shop-c.ua", "none.ua"])
+    assert [(r["domain"], r["answers"]) for r in given] == [("shop-c.ua", 2), ("none.ua", 0)]
+    assert given[1]["type"] == ""

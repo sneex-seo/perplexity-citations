@@ -150,17 +150,23 @@ def _as_id(value) -> int | None:
         return None
 
 
+def cite_order(text: str) -> list[int]:
+    """Номери джерел у тому порядку, в якому відповідь на них уперше посилається."""
+    order: list[int] = []
+    for m in MARKER.finditer(text):
+        for ref in m.group(1).split(","):
+            n = _as_id(ref.strip())
+            if n is not None and n not in order:
+                order.append(n)
+    return order
+
+
 def parse_response(data: dict) -> dict:
     """Відповідь, знайдені джерела і порядок, у якому відповідь на них посилається."""
     output = data.get("output") or []
     answer = "".join(part.get("text", "") for item in output if item.get("type") == "message"
                      for part in item.get("content") or [] if part.get("type") == "output_text")
-    order: list[int] = []
-    for m in MARKER.finditer(answer):
-        for ref in m.group(1).split(","):
-            n = _as_id(ref.strip())
-            if n is not None and n not in order:
-                order.append(n)
+    order = cite_order(answer)
     sources, seen = [], set()
     for item in output:
         if item.get("type") != "search_results":
@@ -237,7 +243,7 @@ def summarize(records: list[dict], own: str = "") -> dict:
 
 
 # ---------------------------------- xlsx -----------------------------------
-def build_xlsx(records: list[dict], summ: dict, path: Path) -> None:
+def build_xlsx(records: list[dict], summ: dict, meta: dict, path: Path) -> None:
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
@@ -270,7 +276,7 @@ def build_xlsx(records: list[dict], summ: dict, path: Path) -> None:
     rows = []
     for n, rec in enumerate(records, 1):
         cited = [s for s in rec["sources"] if s["cited"]]
-        row = [n, rec["prompt"], rec["answer"][:32000], len(rec["sources"]), len(cited),
+        row = [n, rec["prompt"], plain_math(rec["answer"])[:32000], len(rec["sources"]), len(cited),
                ", ".join(dict.fromkeys(s["domain"] for s in sorted(cited, key=lambda s: s["cite_order"])))]
         if own:
             row.append(OWN_LABEL[own_status(rec, own)[0]])
@@ -312,6 +318,19 @@ def build_xlsx(records: list[dict], summ: dict, path: Path) -> None:
           ["№", "Пріоритет", "Домен", "Тип", "У скількох відповідях", "Цитувань"]
           + (["Ваш сайт на цих сторінках"] if checked else []) + ["Що робити", "Процитовані сторінки"],
           [5, 10, 28, 22, 12, 10] + ([24] if checked else []) + [60, 80], rows, {1, 2, 5, 6})
+
+    rows = []
+    for i, c in [("ви", summ["own_row"])] * bool(summ["own_row"]) + list(enumerate(summ["competitors"], 1)):
+        rows.append([i, c["name"], c["domain"], c["type"], len(c["mentions"]) if c["mentions"] is not None else "",
+                     c["answers"] if c["domain"] else "", c["cited"] if c["domain"] else "",
+                     "\n".join(sorted(set(c["mentions"] or []) | set(c["prompts"]), key=[r["prompt"] for r in records].index))])
+    sheet(wb.create_sheet("Конкуренти", 0), ["№", "Бренд", "Сайт", "Тип сайту", "Названо у відповідях",
+                                             "Сайт серед джерел, відповідей", "Цитувань сайту", "Запити"],
+          [5, 18, 26, 18, 12, 14, 10, 90], rows, {1, 5, 6, 7})
+
+    rows = [[k, v] for k, v in brief_rows(meta)] + [["Запитів", len(records)]]
+    rows += [[f"Запит {i}", rec["prompt"]] for i, rec in enumerate(records, 1)]
+    sheet(wb.create_sheet("Що перевіряли", 0), ["Параметр", "Значення"], [22, 100], rows)
     wb.active = 0
     wb.save(path)
 
@@ -333,43 +352,88 @@ table{border-collapse:collapse;width:100%;font-size:14px}th,td{padding:8px 10px;
 th{font-size:12px;color:var(--muted);font-weight:600;white-space:nowrap}td.n,th.n{text-align:right;white-space:nowrap}tr:last-child td{border-bottom:0}
 .bar{height:8px;border-radius:4px;background:var(--accent);min-width:2px}.dom{min-width:170px;overflow-wrap:anywhere}
 details{background:var(--card);border:1px solid var(--line);border-radius:12px;margin:0 0 10px}
-summary{cursor:pointer;padding:12px 14px;display:flex;gap:10px;align-items:baseline}summary .q{flex:1;font-weight:600}
-summary .c{color:var(--muted);font-size:13px;white-space:nowrap}.body{padding:0 14px 14px}
+summary{cursor:pointer;padding:12px 14px;display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline}summary .q{flex:1;font-weight:600}
+summary .c{color:var(--muted);font-size:13px}.body{padding:0 14px 14px}
 .answer{white-space:pre-wrap;background:var(--bg);border-radius:8px;padding:12px;margin:0 0 12px;font-size:14px}
 .answer sup a{text-decoration:none;font-weight:600}.chips{display:flex;flex-wrap:wrap;gap:6px;padding:0 14px 12px}
 .chip{background:var(--soft);color:var(--ink);border-radius:999px;padding:2px 10px;font-size:12px}
-ol.src{margin:0;padding-left:22px;font-size:14px}ol.src li{margin:0 0 6px}ol.src li.no{color:var(--muted)}
 .tag{font-size:12px;border-radius:6px;padding:1px 6px;margin-right:6px;white-space:nowrap}.tag.yes{background:var(--ok);color:#fff}.tag.not{border:1px solid var(--line)}
 .own{border-left:4px solid var(--ok)}footer{margin-top:32px;color:var(--muted);font-size:13px}
 .c{color:var(--muted);font-size:12px}.urls{font-size:12px;margin-top:4px}
 .urls a{display:block;max-width:440px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .st{font-size:12px;border-radius:6px;padding:1px 6px;white-space:nowrap;background:var(--soft)}.st.win{background:var(--ok);color:#fff}
-@media (max-width:640px){table.tgt thead{display:none}
-table.tgt tr{display:grid;grid-template-columns:auto 1fr auto;gap:4px 12px;padding:12px;border-bottom:1px solid var(--line)}
-table.tgt tr:last-child{border-bottom:0}table.tgt td{border:0;padding:0}table.tgt td.dom{min-width:0}
-table.tgt td.stc,table.tgt td.act{grid-column:1/-1}.urls a{max-width:100%}}
+.brief{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px 18px;background:var(--card);
+border:1px solid var(--line);border-radius:12px;padding:14px;margin:12px 0}.brief span{display:block;color:var(--muted);font-size:12px}
+.prompts ol{columns:2;column-gap:32px;margin:0;padding:0 14px 14px 36px;font-size:14px}.prompts li{break-inside:avoid;margin:0 0 4px}
+.prompts{margin-bottom:16px}ul.src{list-style:none;margin:0;padding:0;font-size:14px}ul.src li{margin:0 0 6px}ul.src li.no{color:var(--muted)}
+@media (max-width:640px){.prompts ol{columns:1}table.cards thead{display:none}
+table.cards tr{display:grid;grid-template-columns:auto 1fr auto;gap:4px 12px;padding:12px;border-bottom:1px solid var(--line)}
+table.cards tr:last-child{border-bottom:0}table.cards td{border:0;padding:0}table.cards td.dom{min-width:0}
+table.cards td.wide{grid-column:1/-1}table.cards td.hide{display:none}.urls a{max-width:100%}}
 """
 
 
+# LaTeX у відповідях Perplexity: \( ... \) і \[ ... \] показуються звичайним текстом
+MATH = re.compile(r"\\\((.+?)\\\)|\\\[(.+?)\\\]", re.S)
+MATH_NAMES = {"geq": "≥", "ge": "≥", "leq": "≤", "le": "≤", "times": "×", "cdot": "·", "approx": "≈", "sum": "Σ",
+              "Delta": "Δ", "pm": "±", "neq": "≠", "to": "→", "infty": "∞"}
+
+
+def plain_math(text: str) -> str:
+    def conv(m):
+        s = m.group(1) or m.group(2) or ""
+        s = re.sub(r"\\(?:text|mathrm|textbf|operatorname)\{([^{}]*)\}", r"\1", s)
+        s = re.sub(r"\\frac\{([^{}]*)\}\{([^{}]*)\}", r"(\1)/(\2)", s)
+        s = s.replace("{,}", ",").replace(r"\%", "%").replace(r"\,", " ").replace(r"\;", " ").replace("\\ ", " ")
+        s = re.sub(r"\\([a-zA-Z]+)", lambda k: MATH_NAMES.get(k.group(1), ""), s)
+        s = re.sub(r"_\{([^{}]*)\}", r"(\1)", s).replace("{", "").replace("}", "")
+        return re.sub(r"\s+", " ", s).strip()
+    return MATH.sub(conv, text)
+
+
 def _answer_html(text: str, anchor: str, ids: set[int] | None = None) -> str:
-    """Відповідь із жирним і посиланнями маркерів на джерела; маркери прихованих джерел лишаються без посилання."""
-    out = html.escape(text, quote=False)
+    """Відповідь для звіту: формули текстом, жирне і маркери з тими самими номерами, що в списку джерел.
+
+    Маркер стає [1], якщо це перше джерело, на яке посилається відповідь. Приховані джерела лишаються без посилання."""
+    order = cite_order(text)
+    out = html.escape(plain_math(text), quote=False)
     out = re.sub(r"\*\*(.+?)\*\*", r"<b>\1</b>", out)
 
     def link(m):
-        refs = [_as_id(r.strip()) for r in m.group(1).split(",")]
-        return "".join(f'<sup><a href="#{anchor}-{n}">[{n}]</a></sup>' if ids is None or n in ids else f"<sup>[{n}]</sup>"
-                       for n in refs if n is not None)
+        parts = []
+        for ref in m.group(1).split(","):
+            sid = _as_id(ref.strip())
+            if sid is None or sid not in order:
+                continue
+            k = order.index(sid) + 1
+            parts.append(f'<sup><a href="#{anchor}-{sid}">[{k}]</a></sup>' if ids is None or sid in ids
+                         else f"<sup>[{k}]</sup>")
+        return "".join(parts)
     return MARKER.sub(link, out)
+
+
+def brief_rows(meta: dict) -> list[tuple[str, str]]:
+    """Що перевіряли: бренд, сайт, конкуренти, де і як шукали."""
+    where = f"Perplexity, пошук з країни {meta['country']}" if meta["country"] else "Perplexity, без прив'язки до країни"
+    rows = [("Бренд", ", ".join(meta["brands"]) or "не вказано"), ("Ваш сайт", meta["own"] or "не вказано"),
+            ("Конкуренти", ", ".join(meta["competitors"]) or "автоматично: магазини серед джерел"),
+            ("Де шукали", where), ("Режим і дата", f"{meta['effort']} ({meta['models']}), {meta['span']}")]
+    if meta["hidden"]:
+        rows.append(("Приховано", f"{meta['hidden']} джерел із зон {', '.join('.' + t for t in meta['tlds'])}"))
+    return rows
 
 
 def build_html(records: list[dict], summ: dict, meta: dict, path: Path) -> None:
     e = html.escape
     own, n = summ["own"], summ["prompts"]
-    tiles = [("Промптів", n), ("Знайдено джерел", summ["found"]), ("Процитовано у відповідях", summ["cited"]),
+    pidx = {rec["prompt"]: i for i, rec in enumerate(records, 1)}
+    brief_html = "".join(f"<div><span>{e(k)}</span><b>{e(v)}</b></div>" for k, v in brief_rows(meta))
+    prompts_html = "".join(f'<li><a href="#p{i}">{e(rec["prompt"])}</a></li>' for i, rec in enumerate(records, 1))
+
+    tiles = [("Знайдено джерел", summ["found"]), ("Процитовано у відповідях", summ["cited"]),
              ("Доменів процитовано", summ["domains_cited"]), ("Вартість прогону", f"${summ['cost']:.3f}")]
     if own:
-        tiles.insert(1, (f"{own} процитовано", f"{summ['own_statuses']['cited']} з {n}"))
+        tiles.insert(0, (f"{own} процитовано", f"{summ['own_statuses']['cited']} з {n}"))
     cands = [t for t in summ["targets"] if t["type"] != targets.OWN]
     reachable = sum(1 for t in cands if t["type"] in (targets.MEDIA, targets.BLOG, targets.UGC))
     tiles.insert(-1, ("Медіа, блогів і форумів серед джерел", reachable))
@@ -378,15 +442,43 @@ def build_html(records: list[dict], summ: dict, meta: dict, path: Path) -> None:
         tiles.insert(-1, ("Згадують вас без посилання", sum(1 for t in cands if t["status"] == targets.MENTIONS)))
     tiles_html = "".join(f'<div class="tile"><b>{e(str(v))}</b><span>{e(k)}</span></div>' for k, v in tiles)
 
+    def prompt_links(prompts):
+        shown = "".join(f'<a href="#p{pidx[p]}">{e(p)}</a>' for p in prompts[:3] if p in pidx)
+        more = f'<span class="c">і ще {len(prompts) - 3}</span>' if len(prompts) > 3 else ""
+        return f'<div class="urls">{shown}{more}</div>'
+
+    def comp_row(c, num, cls=""):
+        label = c["name"] or c["domain"]
+        sub = " · ".join(x for x in (c["domain"] if c["name"] else "", c["type"]) if x)
+        named = f'названо у {len(c["mentions"])} з {n}' if c["mentions"] is not None else ""
+        site = (f'сайт у джерелах {c["answers"]} з {n}' if c["answers"] else "сайту серед джерел немає") if c["domain"] else ""
+        prompts = sorted(set(c["mentions"] or []) | set(c["prompts"]), key=lambda p: pidx.get(p, 0))
+        return (f'<tr{cls}><td class="n">{num}</td><td class="dom"><b>{e(label)}</b><div class="c">{e(sub)}</div></td>'
+                f'<td>{"<br>".join(e(x) for x in (named, site) if x)}</td><td class="wide">{prompt_links(prompts)}</td></tr>')
+
+    comp_rows = [comp_row(summ["own_row"], "", ' class="own"')] if summ["own_row"] else []
+    comp_rows += [comp_row(c, i) for i, c in enumerate(summ["competitors"], 1)]
+    if meta["competitors"]:
+        comp_note = "Конкуренти задані параметром <code>--competitors</code>."
+    else:
+        comp_note = ("Автоматично: п'ять магазинів, які Perplexity цитує найчастіше. Свій список конкурентів, назвами "
+                     "брендів і доменами, задайте параметром <code>--competitors</code>.")
+    comp_note += (" «Названо» - у скількох відповідях Perplexity згадує бренд у тексті, «сайт у джерелах» - у скількох "
+                  "відповідях сайт бренду серед процитованих джерел.")
+    comp_html = (f'<div class="scroll"><table class="cards"><thead><tr><th class="n">#</th><th>Бренд і сайт</th>'
+                 f'<th>Видимість у відповідях</th><th>За якими запитами</th></tr></thead>'
+                 f'<tbody>{"".join(comp_rows)}</tbody></table></div>' if comp_rows
+                 else '<p class="meta">Серед процитованих сайтів магазинів немає.</p>')
+
     def target_row(t):
         pages = "".join(f'<a href="{e(u)}" rel="nofollow noopener" target="_blank">{e(title or u)}</a>'
                         for u, title in t["urls"][:3])
         status = ""
         if checked:
             win = " win" if t["status"] == targets.MENTIONS else ""
-            status = f'<td class="stc"><span class="st{win}">{e(t["status"])}</span></td>'
+            status = f'<td class="wide"><span class="st{win}">{e(t["status"])}</span></td>'
         return (f'<tr><td class="n">{t["score"]:g}</td><td class="dom"><b>{e(t["domain"])}</b><div class="c">{e(t["type"])}'
-                f'</div></td><td class="n">{t["answers"]} з {n}</td>{status}<td class="act">{e(t["action"])}'
+                f'</div></td><td class="n">{t["answers"]} з {n}</td>{status}<td class="wide">{e(t["action"])}'
                 f'<div class="urls">{pages}</div></td></tr>')
     targets_html = "".join(target_row(t) for t in cands[:30])
     status_th = "<th>Ваш сайт на сторінках</th>" if checked else ""
@@ -415,20 +507,23 @@ def build_html(records: list[dict], summ: dict, meta: dict, path: Path) -> None:
             for s in rest)
         status = f' · {e(OWN_LABEL[own_status(rec, own)[0]])}' if own else ""
         items.append(
-            f'<details><summary><span class="q">{i}. {e(rec["prompt"])}</span><span class="c">процитовано '
-            f'{len(cited)} з {len(rec["sources"])}{status}</span></summary><div class="chips">{chips}</div>'
+            f'<details id="{anchor}"><summary><span class="q">{i}. {e(rec["prompt"])}</span><span class="c">у відповіді '
+            f'{len(cited)} з {len(rec["sources"])} знайдених джерел{status}</span></summary><div class="chips">{chips}</div>'
             f'<div class="body"><div class="answer">{_answer_html(rec["answer"], anchor, {s["id"] for s in rec["sources"]})}'
-            f'</div><ol class="src">{src}</ol>'
-            f'</div></details>')
+            f'</div><ul class="src">{src}</ul></div></details>')
 
     page = f"""<!doctype html>
 <html lang="uk"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>{e(meta["title"])}</title><style>{CSS}</style></head><body><div class="wrap">
 <h1>{e(meta["title"])}</h1>
-<p class="meta">{e(meta["line"])}</p>
+<div class="brief">{brief_html}</div>
+<details class="prompts" open><summary><span class="q">Запити, які перевіряли: {n}</span></summary><ol>{prompts_html}</ol></details>
 <div class="tiles">{tiles_html}</div>
+<h2>Ваш бренд і конкуренти</h2>
+{comp_html}
+<p class="meta">{comp_note}</p>
 <h2>Де отримати посилання</h2>
-<div class="scroll"><table class="tgt"><thead><tr><th class="n">Пріоритет</th><th>Домен і тип</th><th class="n">У відповідях</th>{status_th}
+<div class="scroll"><table class="cards"><thead><tr><th class="n">Пріоритет</th><th>Домен і тип</th><th class="n">У відповідях</th>{status_th}
 <th>Що робити і які сторінки цитує Perplexity</th></tr></thead><tbody>{targets_html}</tbody></table></div>
 <p class="meta">Пріоритет - у скількох відповідях процитовано домен, помножене на вагу типу: медіа й блоги 1, форуми й
 соцмережі 0.8, маркетплейси 0.6, інше 0.5, магазини 0.4, вікі 0.3, держсайти й наука 0.1. Якщо сторінки домену вже
@@ -438,25 +533,68 @@ def build_html(records: list[dict], summ: dict, meta: dict, path: Path) -> None:
 <th class="n">Частка</th><th></th><th class="n">Цитує із знайденого</th></tr></thead><tbody>{rows_html}</tbody></table></div>
 <p class="meta">«Цитує із знайденого» - яку частку сторінок домену, знайдених пошуком, відповідь справді взяла за джерело.</p>
 <h2>Відповіді та джерела</h2>
+<p class="meta">На кожен запит пошук Perplexity знаходить кілька сторінок, а відповідь посилається лише на частину з них.
+Зелений номер - відповідь послалася на цю сторінку, він збігається з номером у тексті відповіді. «Не процитовано» -
+сторінку знайдено, але у відповідь вона не потрапила.</p>
 {"".join(items)}
 <footer>Звіт зроблено <a href="{REPO_URL}">perplexity-citations</a>. Відповіді Perplexity змінюються від запуску до запуску.</footer>
-</div></body></html>
+</div><script>function op(){{var d=document.getElementById(location.hash.slice(1));if(d&&d.tagName=="DETAILS")d.open=true}}
+addEventListener("hashchange",op);op()</script></body></html>
 """
     path.write_text(page, encoding="utf-8", newline="\n")
 
 
 # ---------------------------------- запуск ---------------------------------
-def report_meta(records: list[dict], effort: str, country: str, hidden: int = 0, tlds: list[str] = ()) -> dict:
+def report_meta(records: list[dict], effort: str, country: str, own: str = "", brands: list[str] = (),
+                competitors: list[str] = (), hidden: int = 0, tlds: list[str] = ()) -> dict:
     dates = sorted(r["ts"][:10] for r in records)
     span = dates[0] if dates[0] == dates[-1] else f"{dates[0]} - {dates[-1]}"
     models = ", ".join(sorted({r["model"] for r in records if r["model"]}))
-    where = f"пошук з країни {country}" if country else "пошук без прив'язки до країни"
-    n = len(records)
-    word = "промпт" if n % 10 == 1 and n % 100 != 11 else "промпти" if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14 else "промптів"
-    line = f"{n} {word} · {span} · режим {effort} ({models}) · {where}"
-    if hidden:
-        line += f" · приховано джерел із зон {', '.join('.' + t for t in tlds)}: {hidden}"
-    return {"title": "Що цитує Perplexity", "line": line}
+    return {"title": "Що цитує Perplexity", "span": span, "models": models, "effort": effort, "country": country,
+            "own": own, "brands": list(brands), "competitors": list(competitors), "hidden": hidden, "tlds": list(tlds)}
+
+
+def parse_rivals(arg: str) -> list[dict]:
+    """--competitors "Bluetti,Fossibot=fossi-bot.com.ua,shop.ua": назва бренду, назва з доменом або лише домен."""
+    out = []
+    for part in (p.strip() for p in arg.split(",")):
+        if not part:
+            continue
+        name, _, dom = (x.strip() for x in part.partition("="))
+        if not dom and "." in name and " " not in name:
+            name, dom = "", name
+        dom = domain_of("https://" + dom.removeprefix("https://").removeprefix("http://")) if dom else ""
+        out.append({"name": name, "domain": dom})
+    return out
+
+
+def mentioned_in(records: list[dict], names: list[str]) -> list[str]:
+    """Запити, у відповідях на які названо бренд (будь-яку з його назв)."""
+    rx = re.compile(r"(?<![\w-])(" + "|".join(re.escape(x) for x in names) + r")(?![\w-])", re.I)
+    return [r["prompt"] for r in records if rx.search(r["answer"])]
+
+
+def rival_rows(records: list[dict], target_rows: list[dict], rivals: list[dict], own: str,
+               brands: list[str]) -> tuple[list[dict], dict | None]:
+    """Конкуренти і ваш рядок для порівняння: скільки разів бренд названо у відповідях і як часто його сайт серед джерел."""
+    cands = [t for t in target_rows if t["type"] != targets.OWN]
+    nothing = {"type": "", "answers": 0, "cited": 0, "prompts": []}
+    if rivals:
+        rows = []
+        for r in rivals:
+            site = targets.competitors(cands, [r["domain"]])[0] if r["domain"] else nothing
+            rows.append({**site, "name": r["name"], "domain": r["domain"],
+                         "mentions": mentioned_in(records, [r["name"]]) if r["name"] else None})
+        rows.sort(key=lambda c: (-len(c["mentions"] or []), -c["answers"], c["name"] or c["domain"]))
+    else:
+        rows = [{**c, "name": "", "mentions": None} for c in targets.competitors(cands)]
+    own_row = None
+    if own or brands:
+        mine = [rec["prompt"] for rec in records if own and own_status(rec, own)[0] == "cited"]
+        own_row = {"name": brands[0] if brands else "", "domain": own, "type": "ваш бренд", "answers": len(mine),
+                   "cited": sum(1 for rec in records for s in rec["sources"] if s["cited"] and is_own(s["domain"], own)),
+                   "prompts": mine, "mentions": mentioned_in(records, brands) if brands else None}
+    return rows, own_row
 
 
 def main() -> None:
@@ -467,6 +605,7 @@ def main() -> None:
     ap.add_argument("input", nargs="?", help="txt (промпт на рядок), xlsx або csv (перша колонка)")
     ap.add_argument("--domain", default="", help="ваш домен: показати, де його цитують, а де ні")
     ap.add_argument("--brand", default="", help="назви бренду через кому: шукати згадки на процитованих сторінках")
+    ap.add_argument("--competitors", default="", help="домени конкурентів через кому; без нього - магазини серед джерел")
     ap.add_argument("--no-fetch", action="store_true", help="не завантажувати процитовані сторінки: тип сайту лише за адресою")
     ap.add_argument("--effort", default=DEFAULT_EFFORT, choices=EFFORTS, help="глибина пошуку (за замовчуванням fast)")
     ap.add_argument("--country", default=DEFAULT_COUNTRY, help='код країни пошуку, "" - без прив\'язки')
@@ -546,10 +685,15 @@ def main() -> None:
         if failed:
             log(f"    не вдалося відкрити {failed} з {len(urls)}: тип для них визначено за адресою")
     summ["targets"], summ["brands"] = targets.link_targets(records, pages, own, brands), brands
+    rivals = parse_rivals(args.competitors)
+    summ["competitors"], summ["own_row"] = rival_rows(records, summ["targets"], rivals, own, brands)
+    meta = report_meta(records, args.effort, country, own, brands,
+                       [f'{r["name"]} ({r["domain"]})' if r["name"] and r["domain"] else r["name"] or r["domain"]
+                        for r in rivals], hidden, tlds)
     stamp = datetime.now().strftime("%Y-%m-%d")
     xlsx_path, html_path = out_dir / f"citations_{stamp}.xlsx", out_dir / "report.html"
-    build_xlsx(records, summ, xlsx_path)
-    build_html(records, summ, report_meta(records, args.effort, country, hidden, tlds), html_path)
+    build_xlsx(records, summ, meta, xlsx_path)
+    build_html(records, summ, meta, html_path)
     if hidden:
         log(f"Приховано джерел із зон {', '.join(tlds)}: {hidden}")
     log(f"Готово. Відповідей: {len(records)}, процитовано джерел: {summ['cited']}, доменів: {summ['domains_cited']}.")
